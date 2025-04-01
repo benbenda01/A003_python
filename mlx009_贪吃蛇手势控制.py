@@ -167,15 +167,20 @@ def draw_chinese_text(img, text, position, text_color=(255, 255, 255), text_size
 
 # 贪吃蛇游戏类
 class SnakeGame:
-    def __init__(self, width=640, height=480):
+    def __init__(self, width=640, height=480, camera_width=320, camera_height=240):
         # 初始化pygame
         pygame.init()
         
-        # 游戏窗口设置
+        # 摄像头区域设置
+        self.camera_width = camera_width
+        self.camera_height = camera_height
+        
+        # 游戏窗口设置 - 增加宽度以容纳摄像头画面
         self.width = width
         self.height = height
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption('贪吃蛇手势控制游戏')
+        self.total_width = width + camera_width  # 总宽度包括游戏区域和摄像头区域
+        self.screen = pygame.display.set_mode((self.total_width, height))
+        pygame.display.set_caption('贪吃蛇手势控制游戏 - 合并窗口')
         
         # 颜色定义
         self.BLACK = (0, 0, 0)
@@ -335,8 +340,10 @@ class SnakeGame:
         self.change_direction(new_direction)
     
     def draw(self):
-        # 绘制游戏界面
-        self.screen.fill(self.BLACK)
+        # 绘制游戏界面 - 只绘制游戏区域，不清空整个屏幕
+        # 创建一个游戏区域的矩形
+        game_area = pygame.Rect(0, 0, self.width, self.height)
+        pygame.draw.rect(self.screen, self.BLACK, game_area)
         
         # 绘制蛇
         for i, segment in enumerate(self.snake):
@@ -390,19 +397,33 @@ class SnakeGame:
             resume_text = self.font.render('按P键继续', True, self.WHITE)
             self.screen.blit(resume_text, (self.width//2 - 60, self.height//2))
         
-        # 更新显示
-        pygame.display.flip()
+        # 注意：不在这里调用pygame.display.flip()，因为我们需要在主循环中绘制完摄像头区域后再更新显示
+
+# OpenCV图像转换为Pygame Surface
+def cv2_image_to_pygame(cv2_image):
+    # 将OpenCV的BGR格式转换为Pygame的RGB格式
+    cv2_image = cv2.cvtColor(cv2_image, cv2.COLOR_BGR2RGB)
+    # 创建Pygame Surface
+    pygame_image = pygame.surfarray.make_surface(cv2_image.swapaxes(0, 1))
+    return pygame_image
 
 # 主程序
 def main():
     # 初始化游戏和摄像头
-    game = SnakeGame(width=800, height=600)
+    camera_width, camera_height = 320, 240
+    game = SnakeGame(width=800, height=600, camera_width=camera_width, camera_height=camera_height)
     cap = cv2.VideoCapture(0)  # 使用默认摄像头
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_height)
     detector = handDetector(detectionCon=0.7)
     
     # 手势控制相关变量
     last_gesture_time = time.time()
     gesture_cooldown = 0.3  # 手势识别冷却时间（秒）
+    
+    # 创建摄像头区域的Surface
+    camera_surface = pygame.Surface((camera_width, camera_height))
+    info_surface = pygame.Surface((camera_width, 150))
     
     # 游戏主循环
     while game.running:
@@ -438,50 +459,48 @@ def main():
                     elif event.key == K_RIGHT:
                         game.change_direction('RIGHT')
         
-        # 如果游戏暂停或结束，只更新显示
-        if game.paused or game.game_over:
-            game.draw()
-            game.clock.tick(30)
-            continue
+        # 绘制游戏区域
+        game.screen.fill(game.BLACK)
         
-        # 手势控制模式
-        if game.game_mode == 2:
-            success, img = cap.read()
-            if success:
-                img = cv2.flip(img, 1)  # 水平翻转图像
-                img = detector.findHands(img)
-                lmList = detector.findPosition(img, draw=True)
-                
-                # 检测手势
-                fingers = detector.fingersUp()
-                finger_count = sum(fingers)
-                
-                # 获取食指朝向
-                direction = detector.getIndexFingerDirection(img)
-                
-                # 创建信息显示区域
-                info_section = np.zeros((150, img.shape[1], 3), np.uint8)
-                
-                # 显示手指状态信息
-                info_section = draw_chinese_text(info_section, f"手指状态: {fingers}, 伸出手指数: {finger_count}", (10, 30))
-                
-                # 显示控制说明
-                info_section = draw_chinese_text(info_section, "控制说明: 伸出食指，指向不同方向控制蛇的移动", (10, 70))
-                
-                # 显示当前方向
-                if direction:
-                    direction_text = {
-                        'UP': '上',
-                        'DOWN': '下',
-                        'LEFT': '左',
-                        'RIGHT': '右'
-                    }.get(direction, '')
-                    info_section = draw_chinese_text(info_section, f"当前方向: {direction_text}", (10, 110), text_color=(0, 255, 255))
-                
-                # 将信息区域添加到图像底部
-                img_with_info = np.vstack([img, info_section])
-                
-                # 根据食指朝向控制方向
+        # 读取摄像头画面并处理
+        success, img = cap.read()
+        direction = None
+        fingers = [0, 0, 0, 0, 0]  # 默认手指状态
+        finger_count = 0
+        
+        if success:
+            img = cv2.flip(img, 1)  # 水平翻转图像
+            img = detector.findHands(img)
+            lmList = detector.findPosition(img, draw=True)
+            
+            # 检测手势
+            fingers = detector.fingersUp()
+            finger_count = sum(fingers)
+            
+            # 获取食指朝向
+            direction = detector.getIndexFingerDirection(img)
+            
+            # 创建信息显示区域
+            info_section = np.zeros((150, img.shape[1], 3), np.uint8)
+            
+            # 显示手指状态信息
+            info_section = draw_chinese_text(info_section, f"手指状态: {fingers}, 伸出手指数: {finger_count}", (10, 30))
+            
+            # 显示控制说明
+            info_section = draw_chinese_text(info_section, "控制说明: 伸出食指，指向不同方向控制蛇的移动", (10, 70))
+            
+            # 显示当前方向
+            if direction:
+                direction_text = {
+                    'UP': '上',
+                    'DOWN': '下',
+                    'LEFT': '左',
+                    'RIGHT': '右'
+                }.get(direction, '')
+                info_section = draw_chinese_text(info_section, f"当前方向: {direction_text}", (10, 110), text_color=(0, 255, 255))
+            
+            # 手势控制模式下根据食指朝向控制方向
+            if game.game_mode == 2 and not game.paused and not game.game_over:
                 current_time = time.time()
                 if current_time - last_gesture_time > gesture_cooldown and fingers[1] == 1 and direction:
                     # 只有食指伸出时才根据方向控制
@@ -497,13 +516,24 @@ def main():
                     }.get(direction, '')
                     cv2.putText(img, f"方向: {direction_text}", (img.shape[1]//2-50, 50), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
-                
-                # 显示摄像头画面
-                cv2.imshow("手势控制", img_with_info)
-                
-                # 按ESC键退出
-                if cv2.waitKey(1) & 0xFF == 27:
-                    game.running = False
+            
+            # 将OpenCV图像转换为Pygame Surface
+            camera_surface = cv2_image_to_pygame(img)
+            info_surface = cv2_image_to_pygame(info_section)
+        
+        # 如果游戏暂停或结束，只更新显示
+        if game.paused or game.game_over:
+            # 绘制游戏区域
+            game.draw()
+            
+            # 绘制摄像头区域
+            game.screen.blit(camera_surface, (game.width, 0))
+            game.screen.blit(info_surface, (game.width, camera_height))
+            
+            # 更新显示
+            pygame.display.flip()
+            game.clock.tick(30)
+            continue
         
         # 自动模式
         if game.game_mode == 1:
@@ -512,16 +542,31 @@ def main():
         # 更新游戏状态
         game.move_snake()
         
-        # 绘制游戏
+        # 绘制游戏区域
         game.draw()
+        
+        # 绘制摄像头区域
+        game.screen.blit(camera_surface, (game.width, 0))
+        game.screen.blit(info_surface, (game.width, camera_height))
+        
+        # 绘制模式指示器
+        mode_indicator = pygame.Surface((20, 20))
+        if game.game_mode == 0:  # 手动模式
+            mode_indicator.fill(game.BLUE)
+        elif game.game_mode == 1:  # 自动模式
+            mode_indicator.fill(game.GREEN)
+        else:  # 手势控制模式
+            mode_indicator.fill(game.RED)
+        game.screen.blit(mode_indicator, (game.width - 30, 10))
+        
+        # 更新显示
+        pygame.display.flip()
         
         # 控制游戏速度
         game.clock.tick(game.snake_speed)
     
     # 清理资源
-    if game.game_mode == 2:
-        cap.release()
-        cv2.destroyAllWindows()
+    cap.release()
     pygame.quit()
 
 # 启动游戏
